@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32 BLE Jam</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background: #111; color: #fff; padding: 24px 16px; }
+    h2   { text-align: center; margin-bottom: 16px; font-size: 20px; }
+
+    #clock { font-size: 52px; font-weight: bold; text-align: center;
+             letter-spacing: 4px; margin: 12px 0; color: #2ecc71; }
+
+    .card  { background: #1e1e1e; border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+    .card h3 { font-size: 13px; color: #aaa; margin-bottom: 10px; text-transform: uppercase; }
+
+    input[type="time"] {
+      width: 100%; padding: 10px; font-size: 22px; border-radius: 8px;
+      border: none; background: #333; color: #fff; text-align: center;
+    }
+
+    button {
+      width: 100%; padding: 13px; font-size: 15px; border-radius: 10px;
+      border: none; cursor: pointer; margin-top: 8px; font-weight: bold;
+    }
+    .btn-green  { background: #2ecc71; color: #000; }
+    .btn-blue   { background: #3498db; color: #fff; }
+    .btn-red    { background: #e74c3c; color: #fff; }
+    .btn-gray   { background: #444;    color: #fff; }
+    button:disabled { background: #333; color: #666; cursor: default; }
+
+    #alarmStatus { text-align: center; font-size: 13px; color: #f39c12;
+                   margin-top: 8px; min-height: 18px; }
+    #status { text-align: center; font-size: 13px; color: #888; margin-top: 12px; }
+
+    .row { display: flex; gap: 8px; }
+    .row button { flex: 1; }
+  </style>
+</head>
+<body>
+
+<h2>⏱️ ESP32C3 BLE Jam</h2>
+<div id="clock">--:--:--</div>
+
+<!-- Koneksi -->
+<div class="card">
+  <h3>🔗 Koneksi</h3>
+  <div class="row">
+    <button class="btn-green" id="btnConnect" onclick="connect()">Hubungkan</button>
+    <button class="btn-blue"  id="btnSync" onclick="syncTime()" disabled>Sync Waktu</button>
+  </div>
+</div>
+
+<!-- Alarm -->
+<div class="card">
+  <h3>⏰ Set Alarm</h3>
+  <input type="time" id="alarmInput" value="07:00">
+  <div class="row">
+    <button class="btn-blue" id="btnSetAlarm" onclick="setAlarm()" disabled>Set Alarm</button>
+    <button class="btn-red"  id="btnDelAlarm" onclick="deleteAlarm()" disabled>Hapus Alarm</button>
+  </div>
+  <div id="alarmStatus">Alarm belum diset</div>
+</div>
+
+<!-- Auto Sync -->
+<div class="card">
+  <h3>🔁 Auto Sync</h3>
+  <button class="btn-gray" id="btnAuto" onclick="toggleAuto()" disabled>▶ Auto Sync (tiap menit)</button>
+</div>
+
+<div id="status">Belum terhubung</div>
+
+<script>
+  const SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+  const CHAR_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+  const CHAR_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+  let rxChar = null, txChar = null;
+  let autoTimer = null, autoOn = false;
+  let currentAlarm = null;
+
+  // Jam lokal di layar
+  setInterval(() => {
+    const n = new Date();
+    document.getElementById("clock").textContent =
+      pad(n.getHours()) + ":" + pad(n.getMinutes()) + ":" + pad(n.getSeconds());
+  }, 1000);
+
+  function pad(n) { return String(n).padStart(2, "0"); }
+
+  async function connect() {
+    try {
+      setStatus("Mencari perangkat...");
+      const device = await navigator.bluetooth.requestDevice({
+        filters: [{ name: "ESP32C3-Jam" }],
+        optionalServices: [SERVICE]
+      });
+      device.addEventListener("gattserverdisconnected", onDisconnect);
+      const server  = await device.gatt.connect();
+      const service = await server.getPrimaryService(SERVICE);
+      rxChar = await service.getCharacteristic(CHAR_RX);
+      txChar = await service.getCharacteristic(CHAR_TX);
+
+      // Terima notifikasi alarm dari ESP32
+      await txChar.startNotifications();
+      txChar.addEventListener("characteristicvaluechanged", onNotify);
+
+      setConnected(true, device.name);
+      syncTime();  // langsung sync saat connect
+    } catch(e) {
+      setStatus("❌ Gagal: " + e.message);
+    }
+  }
+
+  function onNotify(e) {
+    const msg = new TextDecoder().decode(e.target.value);
+    if (msg.includes("BUNYI")) {
+      document.getElementById("alarmStatus").textContent = "🔔 " + msg;
+      // Getar HP juga (jika browser support)
+      if (navigator.vibrate) navigator.vibrate([400, 300, 400, 300, 400]);
+    }
+  }
+
+  async function send(text) {
+    if (!rxChar) return false;
+    try {
+      await rxChar.writeValue(new TextEncoder().encode(text));
+      return true;
+    } catch(e) {
+      setStatus("❌ Kirim gagal: " + e.message);
+      return false;
+    }
+  }
+
+  async function syncTime() {
+    const n = new Date();
+    const t = `T:${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`;
+    if (await send(t)) setStatus("✅ Waktu terkirim: " + t.slice(2));
+  }
+
+  async function setAlarm() {
+    const val = document.getElementById("alarmInput").value;
+    if (!val) return;
+    const [h, m] = val.split(":");
+    const cmd = `A:${h}:${m}`;
+    if (await send(cmd)) {
+      currentAlarm = val;
+      document.getElementById("alarmStatus").textContent =
+        `⏰ Alarm aktif: ${h}:${m}`;
+      setStatus("✅ Alarm diset: " + h + ":" + m);
+    }
+  }
+
+  async function deleteAlarm() {
+    if (await send("X")) {
+      currentAlarm = null;
+      document.getElementById("alarmStatus").textContent = "Alarm dihapus";
+      setStatus("🗑️ Alarm dihapus");
+    }
+  }
+
+  function toggleAuto() {
+    autoOn = !autoOn;
+    const btn = document.getElementById("btnAuto");
+    if (autoOn) {
+      autoTimer = setInterval(syncTime, 60000);
+      btn.textContent  = "⏹ Stop Auto Sync";
+      btn.className    = "btn-red";
+    } else {
+      clearInterval(autoTimer);
+      btn.textContent = "▶ Auto Sync (tiap menit)";
+      btn.className   = "btn-gray";
+    }
+  }
+
+  function setConnected(ok, name = "") {
+    ["btnSync","btnSetAlarm","btnDelAlarm","btnAuto"].forEach(id =>
+      document.getElementById(id).disabled = !ok);
+    document.getElementById("btnConnect").textContent = ok ? "✅ " + name : "Hubungkan";
+    setStatus(ok ? `Terhubung ke: ${name}` : "🔌 Koneksi terputus");
+  }
+
+  function onDisconnect() {
+    rxChar = txChar = null;
+    autoOn = false; clearInterval(autoTimer);
+    setConnected(false);
+    document.getElementById("btnAuto").textContent = "▶ Auto Sync (tiap menit)";
+    document.getElementById("btnAuto").className   = "btn-gray";
+  }
+
+  function setStatus(msg) { document.getElementById("status").textContent = msg; }
+</script>
+</body>
+</html>
+```
+
+---
+
+## Rangkaian Motor Vibration
+
+Motor vibration **tidak boleh langsung ke GPIO** karena arusnya besar. Pakai transistor NPN atau MOSFET:
+```
+GPIO 2 ──[R 1kΩ]──► Base NPN (S8050/2N2222)
+                     Collector ──► Motor (-)
+                     Emitter  ──► GND
+
+Motor (+) ──► 3.3V atau 5V
+Pasang dioda 1N4148 paralel dengan motor (bolak-balik) untuk proteksi
