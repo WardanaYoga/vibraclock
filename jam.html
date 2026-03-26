@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32 BLE Jam</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; padding: 40px; background: #111; color: #fff; }
+    button { padding: 16px 32px; font-size: 18px; border-radius: 12px; border: none;
+             background: #2ecc71; color: #fff; cursor: pointer; margin: 10px; }
+    button:disabled { background: #555; }
+    #status { margin-top: 20px; font-size: 14px; color: #aaa; }
+    #clock  { font-size: 48px; font-weight: bold; margin: 20px 0; letter-spacing: 4px; }
+  </style>
+</head>
+<body>
+  <h2>⏱️ ESP32C3 BLE Jam</h2>
+  <div id="clock">--:--:--</div>
+  <button id="btnConnect" onclick="connect()">🔗 Hubungkan BLE</button>
+  <button id="btnSync"    onclick="syncTime()" disabled>📤 Kirim Waktu Sekarang</button>
+  <button id="btnAuto"    onclick="toggleAuto()" disabled>▶ Auto Sync (tiap menit)</button>
+  <div id="status">Belum terhubung</div>
+
+<script>
+  const SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+  const CHAR_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+
+  let rxChar   = null;
+  let autoTimer = null;
+  let autoOn   = false;
+
+  // Tampil jam HP di layar web
+  setInterval(() => {
+    const n = new Date();
+    document.getElementById("clock").textContent =
+      String(n.getHours()).padStart(2,"0") + ":" +
+      String(n.getMinutes()).padStart(2,"0") + ":" +
+      String(n.getSeconds()).padStart(2,"0");
+  }, 1000);
+
+  async function connect() {
+    try {
+      setStatus("Mencari perangkat...");
+      const device = await navigator.bluetooth.requestDevice({
+        filters: [{ name: "ESP32C3-Jam" }],
+        optionalServices: [SERVICE]
+      });
+      device.addEventListener("gattserverdisconnected", onDisconnect);
+      const server  = await device.gatt.connect();
+      const service = await server.getPrimaryService(SERVICE);
+      rxChar        = await service.getCharacteristic(CHAR_RX);
+
+      document.getElementById("btnSync").disabled  = false;
+      document.getElementById("btnAuto").disabled  = false;
+      document.getElementById("btnConnect").textContent = "✅ Terhubung";
+      setStatus(`Terhubung ke: ${device.name}`);
+
+      syncTime(); // langsung kirim waktu saat connect
+    } catch(e) {
+      setStatus("❌ Gagal: " + e.message);
+    }
+  }
+
+  async function syncTime() {
+    if (!rxChar) return;
+    const n = new Date();
+    const timeStr =
+      String(n.getHours()).padStart(2,"0")   + ":" +
+      String(n.getMinutes()).padStart(2,"0") + ":" +
+      String(n.getSeconds()).padStart(2,"0");
+    try {
+      await rxChar.writeValue(new TextEncoder().encode(timeStr));
+      setStatus("✅ Waktu terkirim: " + timeStr);
+    } catch(e) {
+      setStatus("❌ Kirim gagal: " + e.message);
+    }
+  }
+
+  function toggleAuto() {
+    autoOn = !autoOn;
+    const btn = document.getElementById("btnAuto");
+    if (autoOn) {
+      autoTimer = setInterval(syncTime, 60000); // sync tiap 60 detik
+      btn.textContent = "⏹ Stop Auto Sync";
+      btn.style.background = "#e74c3c";
+      setStatus("🔁 Auto sync aktif (tiap 60 detik)");
+    } else {
+      clearInterval(autoTimer);
+      btn.textContent = "▶ Auto Sync (tiap menit)";
+      btn.style.background = "";
+      setStatus("Auto sync dimatikan");
+    }
+  }
+
+  function onDisconnect() {
+    rxChar = null; autoOn = false;
+    clearInterval(autoTimer);
+    document.getElementById("btnSync").disabled  = true;
+    document.getElementById("btnAuto").disabled  = true;
+    document.getElementById("btnConnect").textContent = "🔗 Hubungkan BLE";
+    setStatus("🔌 Koneksi terputus");
+  }
+
+  function setStatus(msg) {
+    document.getElementById("status").textContent = msg;
+  }
+</script>
+</body>
+</html>
+```
+
+---
